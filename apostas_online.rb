@@ -18,7 +18,7 @@ class ApostasOnline
     unless check_logged()
       response = do_login(ENV['APOSTAS_USERNAME'], ENV['APOSTAS_PASSWORD'])
       check_logged()
-    end
+    end 
     #make_aposta(175807752, 4700296347, 1.89)
   end
 
@@ -258,6 +258,10 @@ class ApostasOnline
 
 end
 
+@@events = []
+@@markets = []
+@@outcomes = []
+
 class Event
   require 'json'
 
@@ -285,10 +289,8 @@ class Event
     self.hora = data[10]
 
     self.timestamp = data[12]
-  end
 
-  def to_s
-    "code #{@code} url #{@url} titulo #{@titulo}"
+    @@events.push self
   end
 
   def subscribe(ws)
@@ -327,7 +329,36 @@ class Market
     self.code2 = data[4]
     self.code3 = data[5]
     self.code4 = data[6]
+    
+    @@markets.push self
+  end
 
+end
+
+class Outcome
+  require 'json'  
+  
+  attr_accessor :data, :flag, :id, :url, :sport_id, :event_id, :price_id, :value, :titulo, :status, :cotation
+
+  def initialize(data_record)
+    data = data_record.split("\u0002")
+    flag = data[0].gsub("\u0014",'')
+    tmp = flag.split("\u0001")[0]
+
+    self.id = flag.split("\u0001")[1]
+    self.url = tmp.split('!')[0]
+    self.sport_id = url.split('/')[2]
+    self.event_id = url.split('/')[3]
+
+
+    self.status = data[1]
+    self.value = eval(data[2])[0]
+    self.price_id = eval(data[3])[0]
+    self.cotation = eval(data[4])[0]
+
+    self.titulo = JSON.parse(data[6])['pt_BR']
+    
+    @@outcomes.push self
   end
 
 end
@@ -370,9 +401,10 @@ require 'active_support'
         initial_subs = [
           #'OffsideGaming/(Rank)*Sports/\d+',
           #'OffsideGaming/Sports/\d+/\d+',
+          'OffsideGaming/(Rank)*Sports/239/\d+',
           'OffsideGaming/(Rank)*Sports/240/\d+',
           #'OffsideGaming/Sports/\d+/\d+/Clock',
-          'OffsideGaming/Quotes/1838743/pt-BR/'
+          "OffsideGaming/Quotes/#{aol.get_account_id()}/pt-BR/"
         ]
         initial_subs.each do |url|
           p "ws.send \x16#{url}"
@@ -399,10 +431,12 @@ require 'active_support'
           #p ['Tem aposta', event.data]
           data = event.data.split("\u0002")
           flag = data[0]
+          matched = false
+          #OffsideGaming/Sports/240/2501739/Markets/2501739HobartZebrasGoalsOverUnderLive90Mins/Selections/1/0\u0001176635725\u0002open\u0002[2]\u0002[4773255250]\u0002[1.18]\u0002@@\u0002
           { sport: /OffsideGaming\/(Rank)*Sports\/\d+$/,
             event: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+$/,
             market: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+$/,
-            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/Selections\/\d\/\d+$/,
+            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/Selections\/\d\/\d+/,
             message: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Messages\/[a-zA-Z_]{5}\/\d+$/,
             clock: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Clock$/,
             scoreboard: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Scoreboard$/,
@@ -412,21 +446,30 @@ require 'active_support'
           }.each do |k,v|
             tipo = flag.gsub("\u0014",'').split("!")[0]
             if tipo.match(v)
+              matched = true
               case k 
               when :event
                 e =  Event.new(event.data)
-                p e.inspect
+                #p e.inspect
                 e.subscribe(ws)
               when :market
                 m = Market.new(event.data)
-                p m.inspect
+                #p m.inspect
+              when :outcome
+                o = Outcome.new(event.data)
+                #p [:outcome, event.data]
+                #p o.inspect
               else 
                 p [k, tipo ]
               end
             end
           end
+          unless matched
+            p [:not_matched, event.data]
+          end
 
         when "\u0015"
+          # atualizacao das outcomes
           p ['Cashout', event.data]
         when "\u0019"
           ws.send(data)
@@ -434,7 +477,6 @@ require 'active_support'
           p [:message, event.data]
         end
         # expressões regulares de mensagens
-        
       end
 
       ws.on(:error) do |event| 
@@ -443,6 +485,9 @@ require 'active_support'
     
       ws.on :close do |event|
         p [:close, event.code, event.reason]
+        p [:events, @@events.inspect]
+        p [:markets, @@markets.inspect]
+        p [:outcomes, @@outcomes.inspect]
         ws = nil
       end
     }
