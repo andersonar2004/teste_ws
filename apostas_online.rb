@@ -11,7 +11,7 @@ class ApostasOnline
   DEBUG = true
 
   #"{\"loggedin\":true,\"username\":\"xxxxx\",\"balance\":\"200,72\",\"balance_not_formatted\":200.72,\"account_number\":\"123456\",\"currency\":\"BRL\",\"minimal_stake\":1.89,\"account_id\":123456}"
-  @user_info = ''
+  @user_info = nil
 
   def main
     #checa autenticação
@@ -19,7 +19,7 @@ class ApostasOnline
       response = do_login(ENV['APOSTAS_USERNAME'], ENV['APOSTAS_PASSWORD'])
       check_logged()
     end
-    #make_aposta(175807725, 4700296322, 1.92)
+    #make_aposta(175807752, 4700296347, 1.89)
   end
 
   def check_logged()
@@ -45,7 +45,7 @@ class ApostasOnline
   #jQuery("span.user_name").text()
   def get_username() 
     res = ''
-    if @user_info['loggedin'] == true
+    if @user_info && @user_info['loggedin'] == true
       res = @user_info['username']
     end
   end
@@ -54,12 +54,20 @@ class ApostasOnline
   #jQuery("span#user_current_balance").text()
   def get_balance()
     res = ''
-    if @user_info['loggedin'] == true
+    if @user_info && @user_info['loggedin'] == true
       res = @user_info['balance']
     end
   end
 
+  def get_account_id()
+    res = ''
+    if @user_info && @user_info['loggedin'] == true
+      res = @user_info['account_id']
+    end
+  end
+
   def do_login(username, password)
+    raise! 'Username not setd' if username.nil? || username == ''
     data_login = {"authenticity_token" => get_authenticity_token,
       "commit" => "Entrar",
       "user[password]" => password,
@@ -179,6 +187,12 @@ class ApostasOnline
     #request["Upgrade-Insecure-Requests"] = "1"
     # Carrega o cookie armazenado no arquivo se for uma situação autenticável
     if authenticated
+      if @user_info.nil?
+        @user_info = {"loggedin" => false}
+        unless check_logged()
+          do_login(ENV['APOSTAS_USERNAME'], ENV['APOSTAS_PASSWORD'])
+        end
+      end
       request["Cookie"] = load_cookie
     end
     # HEADERS
@@ -247,34 +261,75 @@ end
 class Event
   require 'json'
 
-  
+  attr_accessor :data, :flag, :id, :url, :sport_id, :code, :titulo, :placar, :tipo, :etapa, :campeonato, :mandante, :visitante, :hora, :timestamp
 
   def initialize(data_record)
     data = data_record.split("\u0002")
     flag = data[0].gsub("\u0014",'')
     tmp = flag.split("\u0001")[0]
 
-    @id = flag.split("\u0001")[1]
-    @url = tmp.split("!")[0]
-    @code = tmp.split("!")[1]
+    self.id = flag.split("\u0001")[1]
+    self.url = tmp.split("!")[0]
+    self.sport_id = @url.split('/')[2]
+    self.code = tmp.split("!")[1]
 
-    @titulo = JSON.parse(data[1])["pt_BR"]
-    @placar = data[2]
-    @tipo = data[5]
-    @etapa = JSON.parse(data[6])["pt_BR"]
-    @campeonato = JSON.parse(data[7])["pt_BR"]
+    self.titulo = JSON.parse(data[1])["pt_BR"]
+    self.placar = data[2]
+    self.tipo = data[5]
+    self.etapa = JSON.parse(data[6])["pt_BR"]
+    self.campeonato = JSON.parse(data[7])["pt_BR"]
 
-    @mandante = JSON.parse(data[8])["pt_BR"]
-    @visitante = JSON.parse(data[9])["pt_BR"]
+    self.mandante = JSON.parse(data[8])["pt_BR"]
+    self.visitante = JSON.parse(data[9])["pt_BR"]
     
-    @hora = data[10]
+    self.hora = data[10]
 
-    @timestamp = data[12]
+    self.timestamp = data[12]
   end
 
   def to_s
     "code #{@code} url #{@url} titulo #{@titulo}"
   end
+
+  def subscribe(ws)
+    [ "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets/#{@id}MatchResultLive90Mins//",
+      "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets//",
+      "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets/[a-zA-Z0-9]+/Selections/\d/\d+",
+      "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Scoreboard",
+      "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Messages/pt-BR/\d+"
+    ].each do |sub_str|
+      p "subscribe on #{sub_str}"
+      ws.send("\x16#{sub_str}")
+    end
+  end
+end
+
+class Market
+  require 'json'  
+  
+  attr_accessor :data, :flag, :id, :url,:sport_id, :event_id, :code, :titulo, :subtitulo, :status, :tipo, :code2, :code3, :code4
+
+  def initialize(data_record)
+    data = data_record.split("\u0002")
+    flag = data[0].gsub("\u0014",'')
+    tmp = flag.split("\u0001")[0]
+
+    self.id = flag.split("\u0001")[1]
+    self.url = tmp.split('!')[0]
+    self.sport_id = url.split('/')[2]
+    self.event_id = url.split('/')[3]
+    self.code = tmp.split("!")[1]
+
+    self.titulo = JSON.parse(data[1])["pt_BR"]
+    self.subtitulo = JSON.parse(data[2])["pt_BR"]
+    self.status = data[3]
+    self.tipo = url.split('/').last
+    self.code2 = data[4]
+    self.code3 = data[5]
+    self.code4 = data[6]
+
+  end
+
 end
 
 require 'faye/websocket'
@@ -291,7 +346,8 @@ require 'active_support'
       aol = ApostasOnline.new
       password = aol.get_jwt_token(false)
 
-      cache = ActiveSupport::Cache::MemoryStore.new()
+      #cache = ActiveSupport::Cache::MemoryStore.new()
+      cache = ActiveSupport::Cache::FileStore.new('./cache')
       
       ws_url = "wss://ws2.dsvcs.biz/diffusion?v=4&ty=WB&username=#{username}&password=#{password}"
       p "WS CONNECT TO #{ws_url}"
@@ -312,7 +368,7 @@ require 'active_support'
       ws.on :open do |event|
         p [:open]
         initial_subs = [
-          #'6OOffsideGaming/(Rank)*Sports/\d+',
+          #'OffsideGaming/(Rank)*Sports/\d+',
           #'OffsideGaming/Sports/\d+/\d+',
           'OffsideGaming/(Rank)*Sports/240/\d+',
           #'OffsideGaming/Sports/\d+/\d+/Clock',
@@ -322,12 +378,6 @@ require 'active_support'
           p "ws.send \x16#{url}"
           ws.send("\x16#{url}")
         end
-        # ws.send("\x16OffsideGaming/(Rank)*Sports/\\d+")
-        # ws.send("\x16OffsideGaming/Sports/\\d+/\\d+")
-        # ws.send("\x16OffsideGaming/(Rank)*Sports/364/\\d+")
-        # ws.send("\x16OffsideGaming/(Rank)*Sports/1000/\\d+")
-        # ws.send("\x16OffsideGaming/Sports/\\d+/\\d+/Clock")
-        # ws.send("\x16OffsideGaming/Quotes/1838743/pt-BR/")
       end
         
     
@@ -351,21 +401,27 @@ require 'active_support'
           flag = data[0]
           { sport: /OffsideGaming\/(Rank)*Sports\/\d+$/,
             event: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+$/,
-            market: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+/,
-            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/Selections\/\d\/\d+/,
-            message: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Messages\/[a-zA-Z_]{5}\/\d+/,
-            clock: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Clock/,
-            scoreboard: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Scoreboard/,
-            markets: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\//,
+            market: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+$/,
+            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/Selections\/\d\/\d+$/,
+            message: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Messages\/[a-zA-Z_]{5}\/\d+$/,
+            clock: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Clock$/,
+            scoreboard: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Scoreboard$/,
+            markets: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/$/,
             bet: /OffsideGaming\/Outcomes\/\d+/,
             quote: /OffsideGaming\/Quotes\/.*/
           }.each do |k,v|
             tipo = flag.gsub("\u0014",'').split("!")[0]
             if tipo.match(v)
-              p [k, tipo ]
-              if k == :event
+              case k 
+              when :event
                 e =  Event.new(event.data)
-                p e.to_s
+                p e.inspect
+                e.subscribe(ws)
+              when :market
+                m = Market.new(event.data)
+                p m.inspect
+              else 
+                p [k, tipo ]
               end
             end
           end
