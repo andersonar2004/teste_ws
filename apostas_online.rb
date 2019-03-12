@@ -26,7 +26,7 @@ class ApostasOnline
     # recupera informações do usuário
     get_user_info()
     username = get_username()
-    if username == ''
+    if @user_info['loggedin']==false && (username ==nil || username == '')
       p "Não está logado"
       false
     else
@@ -401,7 +401,7 @@ require 'active_support'
         initial_subs = [
           #'OffsideGaming/(Rank)*Sports/\d+',
           #'OffsideGaming/Sports/\d+/\d+',
-          'OffsideGaming/(Rank)*Sports/239/\d+',
+          #'OffsideGaming/(Rank)*Sports/239/\d+',
           'OffsideGaming/(Rank)*Sports/240/\d+',
           #'OffsideGaming/Sports/\d+/\d+/Clock',
           "OffsideGaming/Quotes/#{aol.get_account_id()}/pt-BR/"
@@ -485,9 +485,9 @@ require 'active_support'
     
       ws.on :close do |event|
         p [:close, event.code, event.reason]
-        p [:events, @@events.inspect]
-        p [:markets, @@markets.inspect]
-        p [:outcomes, @@outcomes.inspect]
+        p [:events, @@events.collect{|e| e.titulo }]
+        p [:markets, @@markets.collect{|m| m.titulo }]
+        p [:outcomes, @@outcomes.count ]
         ws = nil
       end
     }
