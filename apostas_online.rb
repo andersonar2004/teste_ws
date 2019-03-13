@@ -8,10 +8,14 @@ class ApostasOnline
 
 
   HOST = "https://www.apostasonline.com"
-  DEBUG = true
+  DEBUG = false
 
   #"{\"loggedin\":true,\"username\":\"xxxxx\",\"balance\":\"200,72\",\"balance_not_formatted\":200.72,\"account_number\":\"123456\",\"currency\":\"BRL\",\"minimal_stake\":1.89,\"account_id\":123456}"
   @user_info = nil
+
+  def initialize(master=false)
+    @master = master
+  end
 
   def main
     #checa autenticação
@@ -48,6 +52,7 @@ class ApostasOnline
     if @user_info && @user_info['loggedin'] == true
       res = @user_info['username']
     end
+    res
   end
 
 
@@ -57,6 +62,7 @@ class ApostasOnline
     if @user_info && @user_info['loggedin'] == true
       res = @user_info['balance']
     end
+    res
   end
 
   def get_account_id()
@@ -64,10 +70,12 @@ class ApostasOnline
     if @user_info && @user_info['loggedin'] == true
       res = @user_info['account_id']
     end
+    res
   end
 
   def do_login(username, password)
-    raise! 'Username not setd' if username.nil? || username == ''
+    raise! 'Username not seted in ENV' if username.nil? || username == ''
+    p "#{username} #{password}" if DEBUG
     data_login = {"authenticity_token" => get_authenticity_token,
       "commit" => "Entrar",
       "user[password]" => password,
@@ -99,8 +107,8 @@ class ApostasOnline
   # Carrega o cookie, 
   # master = true or false
   # quando true carrega o cookie do master
-  def load_cookie(master=false)
-    filename = "cookie#{(master==true) ? 'master' :''}.txt"
+  def load_cookie()
+    filename = "cookie#{(@master==true) ? '_master' :''}.txt"
     if File.exists?(filename)
       saved_cookie = File.read(filename)
     else
@@ -116,10 +124,10 @@ class ApostasOnline
   end
 
   # Salva o cookie retornado, atualiza os valores caso já tenha
-  def save_cookie(cookie, master=false)
-    filename = "cookie#{(master==true) ? 'master' :''}.txt"
-    if load_cookie(master) != ''
-      current_cookie = cookie_to_hash load_cookie(master)
+  def save_cookie(cookie)
+    filename = "cookie#{(@master==true) ? '_master' :''}.txt"
+    if load_cookie() != ''
+      current_cookie = cookie_to_hash load_cookie()
       new_cookie = cookie_to_hash cookie
       new_cookie.map do |k,v| 
         current_cookie[k] = v 
@@ -132,7 +140,7 @@ class ApostasOnline
 
   # Retorna o token de autenticidade que deve ser enviado no formulário
   def get_authenticity_token
-    doc = Nokogiri::HTML( request_get('').body )
+    doc = Nokogiri::HTML( request_get('', false).body )
     # pega o primeiro que é de login o segundo é do form de mudança de timezone
     doc.css('input[name=authenticity_token]')[0].get_attribute('value')
   end
@@ -190,7 +198,11 @@ class ApostasOnline
       if @user_info.nil?
         @user_info = {"loggedin" => false}
         unless check_logged()
-          do_login(ENV['APOSTAS_USERNAME'], ENV['APOSTAS_PASSWORD'])
+          if @master 
+            do_login(ENV['MASTER_APOSTAS_USERNAME'], ENV['MASTER_APOSTAS_PASSWORD'])
+          else
+            do_login(ENV['APOSTAS_USERNAME'], ENV['APOSTAS_PASSWORD'])
+          end
         end
       end
       request["Cookie"] = load_cookie
@@ -291,16 +303,19 @@ class Event
     self.timestamp = data[12]
 
     @@events.push self
+    ActiveSupport::Cache::FileStore.new('./cache').fetch("sport_#{self.id}", expires_in: 2.hours) do
+      self
+    end
   end
 
   def subscribe(ws)
     [ "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets/#{@id}MatchResultLive90Mins//",
       "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets//",
       "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Markets/[a-zA-Z0-9]+/Selections/\d/\d+",
-      "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Scoreboard",
+      #"OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Scoreboard",
       "OffsideGaming/(Rank)*Sports/#{@sport_id}/#{@id}/Messages/pt-BR/\d+"
     ].each do |sub_str|
-      p "subscribe on #{sub_str}"
+      p "subscribe on #{sub_str}" 
       ws.send("\x16#{sub_str}")
     end
   end
@@ -310,7 +325,6 @@ class Market
   require 'json'  
   
   attr_accessor :data, :flag, :id, :url,:sport_id, :event_id, :code, :titulo, :subtitulo, :status, :tipo, :code2, :code3, :code4
-
   def initialize(data_record)
     data = data_record.split("\u0002")
     flag = data[0].gsub("\u0014",'')
@@ -331,6 +345,13 @@ class Market
     self.code4 = data[6]
     
     @@markets.push self
+    cache = ActiveSupport::Cache::FileStore.new('./cache').fetch("martket_#{self.id}", expires_in: 2.hours) do
+      self
+    end
+  end
+
+  def self.find_by_event( event_id )
+    @@markets.select{ |m| m.event_id == event_id }
   end
 
 end
@@ -357,10 +378,52 @@ class Outcome
     self.cotation = eval(data[4])[0]
 
     self.titulo = JSON.parse(data[6])['pt_BR']
-    
-    @@outcomes.push self
+
+    @@outcomes.push self 
+    # ActiveSupport::Cache::FileStore.new('./cache').fetch("outcome_#{self.id}", expires_in: 2.hours) do
+    #   self
+    # end
   end
 
+  def self.update(data_record)
+    data = data_record.split("\u0002")
+    flag = data[0].gsub("\u0015",'')
+    tmp = flag.split("\u0001")[0]
+
+    
+    
+    url = tmp.split('!')[0]
+    idx = @@outcomes.find_index{|o| o.url==url}
+    return if idx.nil? 
+    o = @@outcomes[idx]
+    
+    o.sport_id = url.split('/')[2]
+    o.event_id = url.split('/')[3]
+
+    o.value = data[4]
+    o.price_id = data[3]
+    
+  end
+
+  def self.find_by_url(url)
+    @@outcomes.select{|o| o.url == url }
+  end
+
+
+end
+
+class Quote
+  def initialize(data_record)
+    data = data_record.split("\u0002")
+    flag = data[0].gsub("\u0014",'')
+    tmp = flag.split("\u0001")[0]
+
+    self.id = flag.split("\u0001")[1]
+    self.url = tmp.split('!')[0]
+    self.sport_id = url.split('/')[2]
+    self.event_id = url.split('/')[3]
+
+  end
 end
 
 require 'faye/websocket'
@@ -368,22 +431,22 @@ require 'eventmachine'
 
 require 'permessage_deflate'
 require 'active_support'
-
     EM.run {
       # query de observacao de aposta retorno
       #record separtor \x14
       
-      username = '1838743'
-      aol = ApostasOnline.new
+      # cria uma instancia da classe apostasonline em master caso true
+      aol = ApostasOnline.new( ARGV[0]=='1' ? true : false )
+      username = aol.get_account_id()
       password = aol.get_jwt_token(false)
 
       #cache = ActiveSupport::Cache::MemoryStore.new()
       cache = ActiveSupport::Cache::FileStore.new('./cache')
       
       ws_url = "wss://ws2.dsvcs.biz/diffusion?v=4&ty=WB&username=#{username}&password=#{password}"
-      p "WS CONNECT TO #{ws_url}"
       key = aol.generate_key
-      p "KEY #{key}"
+      #p "WS CONNECT TO #{ws_url}" 
+      #p "KEY #{key}" 
       ws = Faye::WebSocket::Client.new( ws_url,[],
         { 
           :headers => { 'Origin'                   => 'https://www.apostasonline.com',
@@ -407,8 +470,8 @@ require 'active_support'
           "OffsideGaming/Quotes/#{aol.get_account_id()}/pt-BR/"
         ]
         initial_subs.each do |url|
-          p "ws.send \x16#{url}"
-          ws.send("\x16#{url}")
+          #p "ws.send \x16#{url}"
+          #ws.send("\x16#{url}")
         end
       end
         
@@ -426,6 +489,18 @@ require 'active_support'
           data = event.data.split("\x02")
           @reconnect_token = data[2]
           p "save reconnect token #{@reconnect_token}"
+          initial_subs = [
+            #'OffsideGaming/(Rank)*Sports/\d+',
+            #'OffsideGaming/Sports/\d+/\d+',
+            #'OffsideGaming/(Rank)*Sports/239/\d+',
+            'OffsideGaming/(Rank)*Sports/240/\d+',
+            #'OffsideGaming/Sports/\d+/\d+/Clock',
+            "OffsideGaming/Quotes/#{aol.get_account_id()}/pt-BR/"
+          ]
+          initial_subs.each do |url|
+            p "ws.send \x16#{url}"
+            ws.send("\x16#{url}")
+          end
         when "\u0014"
           #apostas \u0014
           #p ['Tem aposta', event.data]
@@ -436,7 +511,7 @@ require 'active_support'
           { sport: /OffsideGaming\/(Rank)*Sports\/\d+$/,
             event: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+$/,
             market: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+$/,
-            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9]+\/Selections\/\d\/\d+/,
+            outcome: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Markets\/[a-zA-Z0-9óôéê]+\/Selections\/\d\/\d+/,
             message: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Messages\/[a-zA-Z_]{5}\/\d+$/,
             clock: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Clock$/,
             scoreboard: /OffsideGaming\/(Rank)*Sports\/\d+\/\d+\/Scoreboard$/,
@@ -444,24 +519,33 @@ require 'active_support'
             bet: /OffsideGaming\/Outcomes\/\d+/,
             quote: /OffsideGaming\/Quotes\/.*/
           }.each do |k,v|
-            tipo = flag.gsub("\u0014",'').split("!")[0]
+            tipo = flag.gsub("\u0014",'').split('!')[0].split("\u0001")[0]
             if tipo.match(v)
               matched = true
-              case k 
-              when :event
-                e =  Event.new(event.data)
-                #p e.inspect
-                e.subscribe(ws)
-              when :market
-                m = Market.new(event.data)
-                #p m.inspect
-              when :outcome
-                o = Outcome.new(event.data)
-                #p [:outcome, event.data]
-                #p o.inspect
-              else 
-                p [k, tipo ]
+              begin
+                case k 
+                when :event
+                  e = Event.new(event.data)
+                  #p e.inspect unless @master
+                  e.subscribe(ws) 
+                when :market
+                  m = Market.new(event.data)
+                  #p m.inspect unless @master
+                when :outcome
+                  o = Outcome.new(event.data)
+                  #p [:outcome, event.data]
+                  #p o.inspect unless @master
+                when :quote
+                  p "QUOTE #{event.data}"
+                  q = Quote.new(event.data)
+                  p q.inspect
+                else 
+                  p [k, tipo ]
+                end
+              rescue => exception
+                p "ERRO #{$!} #{k} #{tipo} #{event.data}"
               end
+              
             end
           end
           unless matched
@@ -470,11 +554,13 @@ require 'active_support'
 
         when "\u0015"
           # atualizacao das outcomes
-          p ['Cashout', event.data]
+          #p [:update, event.data]
+          o = Outcome.update(event.data)
+          #ActiveSupport::Cache::FileStore.new('./cache').write("")
         when "\u0019"
           ws.send(data)
         else
-          p [:message, event.data]
+          p [:not_qualified, event.data]
         end
         # expressões regulares de mensagens
       end
